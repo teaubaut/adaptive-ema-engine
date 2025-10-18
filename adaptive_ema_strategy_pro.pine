@@ -1,0 +1,523 @@
+//@version=6
+strategy('EMA Channel (No Plots)  [15m Alts Preset]',
+     overlay=true, calc_on_every_tick=true, initial_capital=10000,
+     commission_type=strategy.commission.percent, commission_value=0.05, slippage=2,
+     default_qty_type=strategy.fixed, default_qty_value=0, pyramiding=0, max_bars_back=5000)
+
+
+
+// ==============================
+// GROUP TITLES
+// ==============================
+const string G_CORE          = "Core: EMAs & Channels"
+const string G_STOPS         = "Stops & Targets"
+const string G_ATR           = "ATR Settings"
+const string G_ATR_FLOOR     = "Volatility Floor (ATR%)"
+const string G_SIZE          = "Position Sizing"
+const string G_RISK          = "Risk Params (Risk-based)"
+const string G_FILTERS       = "Indicator Filters"
+const string G_REGIME        = "Regime / HTF / ADX / Squeeze"
+const string G_STRUCTURE     = "Structure Filters (Gap / Persistence)"
+const string G_WINDOW        = "Trading Window"
+const string G_COOLDOWN      = "Cooldowns"
+const string G_LIQ           = "Liquidation Safety"
+const string G_EXITS         = "Exit Conditions"
+const string G_LIMITS        = "Position Limits"
+const string G_ENTRY         = "Entry Logic & Cross Behavior"
+const string G_DEBUG         = "Debug / Dev Tools"
+
+// ==============================
+// CORE: EMAs & CHANNELS
+// ==============================
+emaLength1     = input.int(9,   "Channel 1 EMA Length (High/Low)", minval=1, group=G_CORE, tooltip="Length for the first EMA pair forming the inner price channel (used for short-term bias).")
+emaLength2     = input.int(21,  "Channel 2 EMA Length (High/Low)", minval=1, group=G_CORE, tooltip="Length for the second EMA pair forming the outer channel (longer trend filter).")
+lineEmaLength1 = input.int(50,  "Line 1 EMA Length", minval=1, group=G_CORE, tooltip="Primary EMA line (used for stop placement or directional bias).")
+lineEmaLength2 = input.int(200, "Line 2 EMA Length", minval=1, group=G_CORE, tooltip="Secondary EMA line (used for long-term trend structure).")
+
+// ==============================
+// STOPS & TARGETS
+// ==============================
+takeR        = input.float(1.5, "Take Profit (R multiple)", step=0.1, group=G_STOPS, tooltip="Sets the take-profit level as a multiple of your risk (e.g., 1.5R = 1.5× stop distance).")
+stopBasis    = input.string("ATR", "Stop Basis", options=["Line 1 EMA", "ATR"], group=G_STOPS, tooltip="Choose how to calculate stop-loss: fixed to Line 1 EMA or dynamic ATR distance.")
+useStopBuffer= input.bool(true,  "Add 1 tick buffer to Line-1 stops", group=G_STOPS, tooltip="Adds a small extra buffer below/above the stop to prevent premature exits.")
+
+// ==============================
+// ATR SETTINGS
+// ==============================
+atrLen   = input.int(14, "ATR Length", minval=1, group=G_ATR, tooltip="Lookback period for the Average True Range (ATR) volatility calculation.")
+atrMult  = input.float(2.0, "ATR Multiplier", step=0.1, minval=0.1, group=G_ATR, tooltip="Number of ATRs used to set the stop-loss or volatility filters.")
+atrMaType= input.string("RMA", "ATR MA Type", options=["RMA","EMA","SMA","WMA"], group=G_ATR, tooltip="Defines the smoothing method used to calculate the ATR line.")
+
+// ==============================
+// VOLATILITY FLOOR (ATR%)
+// ==============================
+useAtrFloor       = input.bool(true,  "Filter: ATR ≥ Floor (Enable)", group=G_ATR_FLOOR, tooltip="When enabled, only trades if volatility (ATR%) is above a floor threshold.")
+useAutoAtrFloor   = input.bool(true,  "Auto ATR% Floor (use recent history)", group=G_ATR_FLOOR, tooltip="Automatically calculate ATR% floor using historical percentile analysis.")
+autoAtrLookback   = input.int(1440,   "ATR% Lookback Bars", minval=50, group=G_ATR_FLOOR, tooltip="Number of bars used for ATR% percentile calculation (auto floor mode).")
+autoAtrPercentile = input.float(30.0, "ATR% Percentile", step=1.0, minval=1, maxval=99, group=G_ATR_FLOOR, tooltip="Percentile of ATR% used to determine low-volatility cutoff (e.g., 30% = bottom 30% volatility excluded).")
+autoFloorBoost    = input.float(1.0,  "Auto Floor Boost (×)", step=0.05, minval=0.5, maxval=2.0, group=G_ATR_FLOOR, tooltip="Multiplier to slightly raise or lower the computed auto floor.")
+atrFloorManual    = input.float(0.0020, "Manual ATR Floor (price units)", step=0.0001, group=G_ATR_FLOOR, tooltip="Manual fallback ATR floor (used when auto floor is off).")
+
+// ==============================
+// POSITION SIZING
+// ==============================
+sizingMode    = input.string("Collateral×Leverage", "Position Sizing", options=["Collateral×Leverage","Risk-based"], group=G_SIZE, tooltip="Select between fixed spend (Collateral×Leverage) or dynamic sizing based on account risk percentage.")
+collateral    = input.float(10.0, "Collateral per Trade", minval=0.01, step=0.01, group=G_SIZE, tooltip="Amount of collateral (in quote currency) allocated to each trade.")
+tradeLeverage = input.float(10.0, "Trade Leverage (×)", minval=1.0, step=0.5, group=G_SIZE, tooltip="Leverage multiplier applied to collateral to determine total position notional.")
+maxLeverage   = input.float(10.0, "Max Leverage (×)", minval=1.0, step=0.5, group=G_SIZE, tooltip="Caps the leverage for risk-based sizing calculations.")
+
+// ==============================
+// RISK PARAMETERS
+// ==============================
+riskMode  = input.string("Percent of Equity", "Risk Mode (Risk-based)", options=["Percent of Equity","Fixed $"], group=G_RISK, tooltip="Choose how to define risk per trade: percent of equity or fixed dollar value.")
+riskPct   = input.float(1.0, "Risk % of Equity", step=0.1, minval=0.01, maxval=10, group=G_RISK, tooltip="Percent of total account equity to risk on each trade.")
+riskFixed = input.float(5.0, "Risk $ (if Fixed $)", step=0.01, minval=0.01, group=G_RISK, tooltip="Fixed dollar risk amount per trade when using fixed mode.")
+
+// ==============================
+// INDICATOR FILTERS
+// ==============================
+useCCI      = input.bool(true, "Use CCI", group=G_FILTERS, tooltip="Enable CCI (Commodity Channel Index) filter to refine entries.")
+cciLen      = input.int(20, "CCI Length", minval=1, group=G_FILTERS, tooltip="CCI lookback period for momentum filtering.")
+cciLongMin  = input.int(0, "CCI Min for Long (≥)", minval=-300, maxval=300, group=G_FILTERS, tooltip="Minimum CCI value required to allow long entries.")
+cciShortMax = input.int(0, "CCI Max for Short (≤)", minval=-300, maxval=300, group=G_FILTERS, tooltip="Maximum CCI value allowed for short entries.")
+
+useMACD     = input.bool(true, "Use MACD", group=G_FILTERS, tooltip="Enable MACD trend confirmation filter.")
+macdSrc     = input.source(close, "MACD Source", group=G_FILTERS, tooltip="Source price for MACD calculation.")
+fastLen     = input.int(12, "MACD Fast Length", minval=1, group=G_FILTERS, tooltip="Fast EMA length for MACD.")
+slowLen     = input.int(26, "MACD Slow Length", minval=1, group=G_FILTERS, tooltip="Slow EMA length for MACD.")
+sigLen      = input.int(9,  "MACD Signal Length", minval=1, group=G_FILTERS, tooltip="Signal line smoothing period for MACD.")
+useMacdSlope= input.bool(true, "Filter: MACD Slope", group=G_FILTERS, tooltip="Requires MACD to be trending in the same direction as the trade.")
+
+// ==============================
+// REGIME / HTF / ADX / SQUEEZE
+// ==============================
+useHTF        = input.bool(true, "Filter: HTF Trend", group=G_REGIME, tooltip="Enable higher-timeframe trend filter to align trades with broader momentum.")
+htfTf         = input.timeframe("60", "HTF (e.g., 60, 240, D)", group=G_REGIME, tooltip="Select the higher timeframe used for HTF trend analysis.")
+useADX        = input.bool(true, "Filter: ADX ≥ Min", group=G_REGIME, tooltip="Enable ADX trend-strength filter to avoid choppy conditions.")
+adxLen        = input.int(14, "ADX Length", minval=1, group=G_REGIME, tooltip="ADX calculation period.")
+adxSmoothLen  = input.int(14, "ADX Smoothing Length", minval=1, group=G_REGIME, tooltip="Smoothing period applied to ADX calculation.")
+adxMin        = input.float(25.0, "ADX Min", step=0.5, group=G_REGIME, tooltip="Minimum ADX threshold required to validate trend.")
+useRegimeFilter = input.bool(true, "Filter: Market Regime (ADX)", group=G_REGIME, tooltip="Apply regime-based ADX filter (e.g., trending vs ranging markets).")
+minADXTrend   = input.float(22.0, "Min ADX for Trending", minval=5.0, step=0.5, group=G_REGIME, tooltip="Defines what ADX value is considered a trending regime.")
+useBBSqueezeFilter = input.bool(true, "Filter: Avoid BB Squeeze", group=G_REGIME, tooltip="Avoid entries when Bollinger Bands are compressed (low volatility).")
+bbLen         = input.int(20, "BB Length", minval=5, group=G_REGIME, tooltip="Bollinger Band lookback length.")
+bbMult        = input.float(2.0, "BB Multiplier", step=0.1, group=G_REGIME, tooltip="Standard deviation multiplier for Bollinger Bands.")
+squeezePct    = input.float(4.0, "BB Squeeze Width % (<=)", step=0.1, group=G_REGIME, tooltip="Percent width of BB bands considered as squeeze condition.")
+
+// ==============================
+// STRUCTURE FILTERS
+// ==============================
+useGapFilter = input.bool(true,  "Filter: Channel Gap ≥ k×ATR", group=G_STRUCTURE, tooltip="Require a minimum EMA-channel gap before entering (helps ensure momentum).")
+gapAtrMult   = input.float(0.25, "Gap ATR Mult", step=0.01, group=G_STRUCTURE, tooltip="Gap threshold multiplier based on ATR.")
+usePersist   = input.bool(true,  "Filter: Persist N bars", group=G_STRUCTURE, tooltip="Require signal conditions to persist for consecutive bars before confirming.")
+persistBars  = input.int(2, "Persist Bars", minval=1, group=G_STRUCTURE, tooltip="How many bars signal conditions must persist.")
+
+// ==============================
+// TRADING WINDOW
+// ==============================
+useSession   = input.bool(false, "Filter: Session only", group=G_WINDOW, tooltip="Restrict trading to defined intraday session times.")
+sess         = input.session("0930-1130,1300-1500", "Session", group=G_WINDOW, tooltip="Define allowed trading sessions (e.g., market open).")
+useDOW       = input.bool(false, "Filter: Weekdays only", group=G_WINDOW, tooltip="Restrict trades to Monday–Friday.")
+useOnePerDay = input.bool(false, "Max 1 trade per day", group=G_WINDOW, tooltip="Limit to one trade per calendar day.")
+
+// ==============================
+// COOLDOWNS
+// ==============================
+useCooldownLoss  = input.bool(false, "Cooldown after Loss", group=G_COOLDOWN, tooltip="Pause trading for a set number of bars after a losing trade.")
+coolBarsLoss     = input.int(30, "Cooldown Bars (Loss)", minval=1, group=G_COOLDOWN, tooltip="Number of bars to wait after a losing trade.")
+useCooldownEarly = input.bool(true, "Cooldown after Early Exit", group=G_COOLDOWN, tooltip="Pause trading after early exit or invalidation before re-entry.")
+coolEarlyBars    = input.int(10, "Cooldown Bars (Early Exit)", minval=1, group=G_COOLDOWN, tooltip="Bars to wait after early exit.")
+useCooldownWin   = input.bool(false, "Cooldown after Win", group=G_COOLDOWN, tooltip="Pause trading for a cooldown period after a winning trade.")
+coolWinBars      = input.int(10, "Cooldown Bars (Win)", minval=1, group=G_COOLDOWN, tooltip="Number of bars to pause after winning trade.")
+
+// ==============================
+// LIQUIDATION SAFETY
+// ==============================
+liqBufferPct = input.float(0.002, "Liquidation Buffer (%)", step=0.0001, group=G_LIQ, tooltip="Extra buffer distance from estimated liquidation price for safety.")
+liqHandling  = input.string("Tighten Stop", "If Stop Violates Liq", options=["Tighten Stop","Skip Trade"], group=G_LIQ, tooltip="Choose how to handle trades whose stops would breach liquidation threshold.")
+
+// ==============================
+// EXIT CONDITIONS
+// ==============================
+useExitEMACross    = input.bool(true, "Exit: Line1 crosses Line2", group=G_EXITS, tooltip="Exit trade when EMA Line1 crosses Line2 in the opposite direction.")
+useExitChannelInv  = input.bool(true, "Exit: Channel 1 inverts vs Channel 2", group=G_EXITS, tooltip="Exit when short-term EMA channel flips against longer-term channel.")
+useExitMACDFlip    = input.bool(true, "Exit: MACD flips", group=G_EXITS, tooltip="Exit when MACD crosses zero or signal line in opposite direction.")
+useExitCCICross    = input.bool(false, "Exit: CCI crosses 0", group=G_EXITS, tooltip="Exit when CCI crosses back through zero level.")
+useExitHTFFlip     = input.bool(true, "Exit: HTF trend flips", group=G_EXITS, tooltip="Exit when higher timeframe trend reverses.")
+useExitADXDrop     = input.bool(false, "Exit: ADX < min", group=G_EXITS, tooltip="Exit when ADX falls below minimum trend-strength threshold.")
+useTimeStop        = input.bool(false, "Exit: Time stop (bars)", group=G_EXITS, tooltip="Enable maximum holding time exit based on bar count.")
+maxBarsInTrade     = input.int(96, "Max bars in trade", minval=1, group=G_EXITS, tooltip="Exit after holding position this many bars.")
+
+// ==============================
+// POSITION LIMITS
+// ==============================
+useMaxOpenPositions = input.bool(true, "Limit Max Open Positions", group=G_LIMITS, tooltip="Restrict the number of simultaneous open trades.")
+maxOpenPositions    = input.int(1, "Max Open Positions", minval=1, group=G_LIMITS, tooltip="Maximum allowed concurrent trades.")
+
+// ==============================
+// ENTRY LOGIC & CROSS
+// ==============================
+entryMode      = input.string("Strict", "Entry Structure", options=["Strict","Moderate","Aggressive"], group=G_ENTRY, tooltip="Controls how precise signals must align (Strict = all filters align; Aggressive = faster entries).")
+useCrossBoost  = input.bool(true, "Cross Entry Boost (1-bar)", group=G_ENTRY, tooltip="Temporarily increases sensitivity immediately after EMA cross.")
+useHybridCross = input.bool(true, "Hybrid Confirm-after-Cross entries", group=G_ENTRY, tooltip="Waits for confirmation bars after cross to avoid fakeouts.")
+confirmBars    = input.int(3, "Bars for Trend Confirm (after cross)", minval=1, maxval=10, group=G_ENTRY, tooltip="Number of bars after cross required for confirmation.")
+
+// ==============================
+// DEBUG
+// ==============================
+debug = input.bool(false, "Debug: show reasons (label on last bar only)", group=G_DEBUG, tooltip="Show debug labels explaining why trades were taken or filtered.")
+_     = input.bool(true,  "", group=G_DEBUG)
+
+
+// ==============================
+// HELPERS
+// ==============================
+f_pos(x) => math.max(x, syminfo.mintick)
+f_ma(src,len,type)=> type=='EMA'?ta.ema(src,len):type=='SMA'?ta.sma(src,len):type=='WMA'?ta.wma(src,len):ta.rma(src,len)
+
+f_enforceLiqStopLong(e,st,L,bufPct,handling)=>
+    maxDD=1.0/L-bufPct
+    maxDD:=math.max(maxDD,0.0001)
+    floorStop=e*(1.0-maxDD)
+    violates=st<floorStop
+    safeStop=violates?floorStop:st
+    allowed=handling=='Tighten Stop'?true:not violates
+    safeStop:=safeStop>=e?e-syminfo.mintick:safeStop
+    [safeStop,allowed]
+
+f_enforceLiqStopShort(e,st,L,bufPct,handling)=>
+    maxDD=1.0/L-bufPct
+    maxDD:=math.max(maxDD,0.0001)
+    ceilStop=e*(1.0+maxDD)
+    violates=st>ceilStop
+    safeStop=violates?ceilStop:st
+    allowed=handling=='Tighten Stop'?true:not violates
+    safeStop:=safeStop<=e?e+syminfo.mintick:safeStop
+    [safeStop,allowed]
+
+// Risk sizing helpers
+riskUnits(targetRisk, entry, stop) =>
+    ru = targetRisk / math.max(math.abs(entry - stop), syminfo.mintick)
+    math.max(ru, 0.0)
+
+capByMaxLevUnits(units0, price, collateral, maxLev) =>
+    // Copy arg -> local before mutating
+    u = units0
+    maxNotional = collateral * maxLev
+    notional = u * price
+    if notional > maxNotional
+        notional := maxNotional
+        u := notional / price
+    [u, notional]
+
+
+effLevFromNotional(notional, collateral) =>
+    math.max(notional / math.max(collateral, syminfo.mintick), 1.0)
+
+dbgCond(name, boolval, arr) => array.push(arr, (boolval ? '✅ ' : '❌ ') + name)
+
+// ==============================
+// CORE CALCS
+// ==============================
+emaHigh1=ta.ema(high,emaLength1)
+emaLow1 =ta.ema(low ,emaLength1)
+emaHigh2=ta.ema(high,emaLength2)
+emaLow2 =ta.ema(low ,emaLength2)
+emaLine1=ta.ema(close,lineEmaLength1)
+emaLine2=ta.ema(close,lineEmaLength2)
+
+cci=ta.cci(hlc3,cciLen)
+macd=ta.ema(macdSrc,fastLen)-ta.ema(macdSrc,slowLen)
+macdSignal=ta.ema(macd,sigLen)
+
+prevClose=nz(close[1],close)
+trRaw=math.max(high-low, math.max(math.abs(high-prevClose), math.abs(low-prevClose)))
+atrCustom=f_ma(trRaw,atrLen,atrMaType)
+
+atr14=ta.atr(14)
+atrPct=atr14/close*100
+atrPctFloor=ta.percentile_linear_interpolation(atrPct,autoAtrLookback,autoAtrPercentile)
+atrFloorAutoAbs=na(atrPctFloor)?na:atrPctFloor/100*close*autoFloorBoost
+atrFloorEff=(useAutoAtrFloor and not na(atrFloorAutoAbs))?atrFloorAutoAbs:atrFloorManual
+
+// ==============================
+// STRUCTURE & SIGNALS
+// ==============================
+ch1AboveCh2=emaLow1>emaHigh2
+ch1BelowCh2=emaHigh1<emaLow2
+bothChAboveLines=emaLow1>emaLine1 and emaLow1>emaLine2 and emaLow2>emaLine1 and emaLow2>emaLine2
+bothChBelowLines=emaHigh1<emaLine1 and emaHigh1<emaLine2 and emaHigh2<emaLine1 and emaHigh2<emaLine2
+trendUp=emaLine1>emaLine2
+trendDown=emaLine1<emaLine2
+
+cciLongOK = not useCCI or cci >= cciLongMin
+cciShortOK= not useCCI or cci <= cciShortMax
+macdCondLong = not useMACD or macd > macdSignal
+macdCondShort= not useMACD or macd < macdSignal
+
+// Structure tiers
+strictLong  = ch1AboveCh2 and bothChAboveLines and trendUp
+strictShort = ch1BelowCh2 and bothChBelowLines and trendDown
+moderateLong  = (emaHigh1 > emaHigh2) and (emaLine1 > emaLine2)
+moderateShort = (emaLow1  < emaLow2 ) and (emaLine1 < emaLine2)
+aggressiveLong  = (emaLine1 > emaLine2) and (close > emaLine1)
+aggressiveShort = (emaLine1 < emaLine2) and (close < emaLine1)
+
+longCross  = ta.crossover(emaLow1, emaHigh2) and (emaLine1 > emaLine2)
+shortCross = ta.crossunder(emaHigh1, emaLow2) and (emaLine1 < emaLine2)
+
+bool structureLong=false
+if entryMode=='Strict'
+    structureLong:=strictLong
+else if entryMode=='Moderate'
+    structureLong:=moderateLong
+else
+    structureLong:=aggressiveLong
+
+bool structureShort=false
+if entryMode=='Strict'
+    structureShort:=strictShort
+else if entryMode=='Moderate'
+    structureShort:=moderateShort
+else
+    structureShort:=aggressiveShort
+
+// Hybrid cross + confirm
+crossDown=ta.crossunder(emaLow1,emaHigh2)
+crossUp  =ta.crossover (emaLow1,emaHigh2)
+var int barsSinceCrossDown=1000
+var int barsSinceCrossUp  =1000
+barsSinceCrossDown:=crossDown?0:barsSinceCrossDown+1
+barsSinceCrossUp  :=crossUp  ?0:barsSinceCrossUp+1
+trendConfirmedDown=emaLine1<emaLine2
+trendConfirmedUp  =emaLine1>emaLine2
+hybridShort=useHybridCross and (barsSinceCrossDown<=confirmBars) and trendConfirmedDown
+hybridLong =useHybridCross and (barsSinceCrossUp  <=confirmBars) and trendConfirmedUp
+
+baseLong =(structureLong  or (useCrossBoost and longCross)  or hybridLong)  and cciLongOK  and macdCondLong
+baseShort=(structureShort or (useCrossBoost and shortCross) or hybridShort) and cciShortOK and macdCondShort
+
+// Higher TF & regime
+htfLine1=request.security(syminfo.tickerid, htfTf, ta.ema(close, lineEmaLength1))
+htfLine2=request.security(syminfo.tickerid, htfTf, ta.ema(close, lineEmaLength2))
+htfUp=htfLine1>htfLine2
+htfDown=htfLine1<htfLine2
+
+[dip, dim, adxVal]=ta.dmi(adxLen, adxSmoothLen)
+
+inSess = not useSession or time(timeframe.period, sess) != 0
+dow_ok = not useDOW or (dayofweek>=dayofweek.monday and dayofweek<=dayofweek.friday)
+
+gapOKLong = not useGapFilter or (emaLow1 - emaHigh2) >= gapAtrMult * atrCustom
+gapOKShort= not useGapFilter or (emaLow2 - emaHigh1) >= gapAtrMult * atrCustom
+
+macdSlopeUp   = not useMacdSlope or (macd > macdSignal and macd > macd[1])
+macdSlopeDown = not useMacdSlope or (macd < macdSignal and macd < macd[1])
+
+bbBasis=ta.sma(close, bbLen)
+bbDev=bbMult*ta.stdev(close, bbLen)
+bbUpper=bbBasis+bbDev
+bbLower=bbBasis-bbDev
+bbWidthPct=bbBasis!=0 ? (bbUpper-bbLower)/bbBasis*100 : 0
+
+isTrendingMarket=adxVal>=minADXTrend
+isBBSqueeze=bbWidthPct<=squeezePct
+regimeOK=(not useRegimeFilter or isTrendingMarket) and (not useBBSqueezeFilter or not isBBSqueeze)
+
+// Persistence
+var int longPersist=0, shortPersist=0
+longPersist := baseLong  ? math.min(longPersist +1, 1000000) : 0
+shortPersist:= baseShort ? math.min(shortPersist+1, 1000000) : 0
+persistLongOK  = not usePersist or longPersist  >= persistBars
+persistShortOK = not usePersist or shortPersist >= persistBars
+
+// Cooldowns & daily gates
+var int barsSinceLoss=1000000000, barsSinceWin=1000000000, barsSinceEarlyExit=1000000000
+barsSinceLoss+=1, barsSinceWin+=1, barsSinceEarlyExit+=1
+closedNow = strategy.closedtrades>0 and strategy.closedtrades != nz(strategy.closedtrades[1])
+lastProfit = closedNow ? strategy.closedtrades.profit(strategy.closedtrades-1) : na
+if closedNow
+    if lastProfit < 0
+        barsSinceLoss := 0
+    if lastProfit > 0
+        barsSinceWin  := 0
+cooldownLossOK  = not useCooldownLoss  or barsSinceLoss      >= coolBarsLoss
+cooldownWinOK   = not useCooldownWin   or barsSinceWin       >= coolWinBars
+cooldownEarlyOK = not useCooldownEarly or barsSinceEarlyExit >= coolEarlyBars
+
+dayKey=time('D')
+var int lastTradeDay=na
+mayTradeToday = not useOnePerDay or na(lastTradeDay) or dayKey != lastTradeDay
+
+maxOpenOK = not useMaxOpenPositions or strategy.opentrades < maxOpenPositions
+
+atrGate = not useAtrFloor or (not na(atrFloorEff) and atrCustom >= atrFloorEff)
+
+longFiltered  = persistLongOK  and baseLong  and (not useHTF or htfUp)   and (not useADX or adxVal >= adxMin) and atrGate and gapOKLong  and inSess and dow_ok and cooldownLossOK and cooldownWinOK and cooldownEarlyOK and mayTradeToday and macdSlopeUp   and maxOpenOK and regimeOK
+shortFiltered = persistShortOK and baseShort and (not useHTF or htfDown) and (not useADX or adxVal >= adxMin) and atrGate and gapOKShort and inSess and dow_ok and cooldownLossOK and cooldownWinOK and cooldownEarlyOK and mayTradeToday and macdSlopeDown and maxOpenOK and regimeOK
+
+// ==============================
+// STOP SNAPSHOTS
+// ==============================
+f_longSnapshot() =>
+    e = close
+    stLine = emaLine1 - (useStopBuffer ? syminfo.mintick : 0)
+    stATR = e - atrCustom * atrMult
+    [e, stopBasis=='ATR' ? stATR : stLine]
+
+f_shortSnapshot() =>
+    e = close
+    stLine = emaLine1 + (useStopBuffer ? syminfo.mintick : 0)
+    stATR = e + atrCustom * atrMult
+    [e, stopBasis=='ATR' ? stATR : stLine]
+
+// ==============================
+// ORDER EXECUTION (UNITS = notional/price)
+// ==============================
+var int barsInPos=0
+if ta.change(strategy.position_size) != 0
+    barsInPos := 0
+else if strategy.position_size != 0
+    barsInPos += 1
+
+riskDollarsCalc() => riskMode=='Percent of Equity' ? strategy.equity * riskPct / 100 : riskFixed
+capNotional(n) => math.min(n, collateral * maxLeverage)
+
+// LONG
+if longFiltered and strategy.position_size <= 0
+    [e, st0] = f_longSnapshot()
+    float unitsFinal=0.0, notionalFinal=0.0, stSafe=st0
+
+    if sizingMode == 'Collateral×Leverage'
+        notionalWanted = collateral * math.min(tradeLeverage, maxLeverage)
+        notionalFinal  = capNotional(notionalWanted)
+        levEff = effLevFromNotional(notionalFinal, collateral)
+        [stSafe, ok] = f_enforceLiqStopLong(e, st0, levEff, liqBufferPct, liqHandling)
+        unitsFinal := ok and notionalFinal > 0 ? notionalFinal / e : 0.0
+    else
+        targetRisk = riskDollarsCalc()
+        unitsWanted = riskUnits(targetRisk, e, st0)
+        [unitsCapped, notionalCapped] = capByMaxLevUnits(unitsWanted, e, collateral, maxLeverage)
+        levEff1 = effLevFromNotional(notionalCapped, collateral)
+        [stSafe1, okPre] = f_enforceLiqStopLong(e, st0, levEff1, liqBufferPct, liqHandling)
+        if okPre
+            unitsWanted2 = riskUnits(targetRisk, e, stSafe1)
+            [unitsFinal2, notionalFinal2] = capByMaxLevUnits(unitsWanted2, e, collateral, maxLeverage)
+            unitsFinal := unitsFinal2
+            notionalFinal := notionalFinal2
+            stSafe := stSafe1
+
+    if unitsFinal > 0
+        riskPerUnit = math.max(e - stSafe, syminfo.mintick)
+        tpL = e + takeR * riskPerUnit
+        strategy.entry('Long', strategy.long, qty = unitsFinal)
+        strategy.exit('Exit Long', from_entry='Long', stop=stSafe, limit=tpL)
+        lastTradeDay := dayKey
+
+// SHORT
+if shortFiltered and strategy.position_size >= 0
+    [e, st0] = f_shortSnapshot()
+    float unitsFinalS=0.0, notionalFinalS=0.0, stSafeS=st0
+
+    if sizingMode == 'Collateral×Leverage'
+        notionalWantedS = collateral * math.min(tradeLeverage, maxLeverage)
+        notionalFinalS  = capNotional(notionalWantedS)
+        levEffS = effLevFromNotional(notionalFinalS, collateral)
+        [stSafeS, okS] = f_enforceLiqStopShort(e, st0, levEffS, liqBufferPct, liqHandling)
+        unitsFinalS := okS and notionalFinalS > 0 ? notionalFinalS / e : 0.0
+    else
+        targetRisk = riskDollarsCalc()
+        unitsWanted = riskUnits(targetRisk, e, st0)
+        [unitsCapped, notionalCapped] = capByMaxLevUnits(unitsWanted, e, collateral, maxLeverage)
+        levEff1 = effLevFromNotional(notionalCapped, collateral)
+        [stSafe1, okPre] = f_enforceLiqStopShort(e, st0, levEff1, liqBufferPct, liqHandling)
+        if okPre
+            unitsWanted2 = riskUnits(targetRisk, e, stSafe1)
+            [unitsFinal2, notionalFinal2] = capByMaxLevUnits(unitsWanted2, e, collateral, maxLeverage)
+            unitsFinalS := unitsFinal2
+            notionalFinalS := notionalFinal2
+            stSafeS := stSafe1
+
+    if unitsFinalS > 0
+        riskPerUnit = math.max(stSafeS - e, syminfo.mintick)
+        tpS = e - takeR * riskPerUnit
+        strategy.entry('Short', strategy.short, qty = unitsFinalS)
+        strategy.exit('Exit Short', from_entry='Short', stop=stSafeS, limit=tpS)
+        lastTradeDay := dayKey
+
+// ==============================
+// EARLY EXITS
+// ==============================
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+emaFlipLong  = emaLine1 <= emaLine2
+emaFlipShort = emaLine1 >= emaLine2
+chInvertLong  = emaHigh1 >= emaLow2
+chInvertShort = emaLow1  <= emaHigh2
+macdFlipLong  = macd <= macdSignal
+macdFlipShort = macd >= macdSignal
+cciFlipLong  = cci < 0
+cciFlipShort = cci > 0
+htfFlipLong  = not htfUp
+htfFlipShort = not htfDown
+adxDrop  = adxVal < adxMin
+timeStop = barsInPos >= maxBarsInTrade
+
+if inLong
+    exitNowLong = (useExitEMACross and emaFlipLong) or (useExitChannelInv and chInvertLong) or (useExitMACDFlip and macdFlipLong) or (useExitCCICross and cciFlipLong) or (useExitHTFFlip and htfFlipLong) or (useExitADXDrop and adxDrop) or (useTimeStop and timeStop)
+    if exitNowLong
+        strategy.close('Long', comment='EarlyExit: Trend turn')
+        barsSinceEarlyExit := 0
+
+if inShort
+    exitNowShort = (useExitEMACross and emaFlipShort) or (useExitChannelInv and chInvertShort) or (useExitMACDFlip and macdFlipShort) or (useExitCCICross and cciFlipShort) or (useExitHTFFlip and htfFlipShort) or (useExitADXDrop and adxDrop) or (useTimeStop and timeStop)
+    if exitNowShort
+        strategy.close('Short', comment='EarlyExit: Trend turn')
+        barsSinceEarlyExit := 0
+
+// ==============================
+// DEBUG LABEL (last bar)
+// ==============================
+var label dbg = na
+if debug and barstate.islast
+    if not na(dbg)
+        label.delete(dbg)
+    reasonsLong  = array.new_string()
+    reasonsShort = array.new_string()
+    dbgCond('baseLong', baseLong, reasonsLong)
+    dbgCond('persistLongOK', persistLongOK, reasonsLong)
+    dbgCond('HTF up', (not useHTF or htfUp), reasonsLong)
+    dbgCond('ADX ≥ min', (not useADX or adxVal >= adxMin), reasonsLong)
+    dbgCond('ATR gate', atrGate, reasonsLong)
+    dbgCond('Gap OK', gapOKLong, reasonsLong)
+    dbgCond('Session', inSess, reasonsLong)
+    dbgCond('Weekday', dow_ok, reasonsLong)
+    dbgCond('Cooldowns', (cooldownLossOK and cooldownWinOK and cooldownEarlyOK), reasonsLong)
+    dbgCond('1/day', mayTradeToday, reasonsLong)
+    dbgCond('MACD slope up', macdSlopeUp, reasonsLong)
+    dbgCond('Max open OK', maxOpenOK, reasonsLong)
+    dbgCond('Regime OK', regimeOK, reasonsLong)
+    dbgCond('Flat/short pos', strategy.position_size <= 0, reasonsLong)
+
+    dbgCond('baseShort', baseShort, reasonsShort)
+    dbgCond('persistShortOK', persistShortOK, reasonsShort)
+    dbgCond('HTF down', (not useHTF or htfDown), reasonsShort)
+    dbgCond('ADX ≥ min', (not useADX or adxVal >= adxMin), reasonsShort)
+    dbgCond('ATR gate', atrGate, reasonsShort)
+    dbgCond('Gap OK', gapOKShort, reasonsShort)
+    dbgCond('Session', inSess, reasonsShort)
+    dbgCond('Weekday', dow_ok, reasonsShort)
+    dbgCond('Cooldowns', (cooldownLossOK and cooldownWinOK and cooldownEarlyOK), reasonsShort)
+    dbgCond('1/day', mayTradeToday, reasonsShort)
+    dbgCond('MACD slope down', macdSlopeDown, reasonsShort)
+    dbgCond('Max open OK', maxOpenOK, reasonsShort)
+    dbgCond('Regime OK', regimeOK, reasonsShort)
+    dbgCond('Flat/long pos', strategy.position_size >= 0, reasonsShort)
+
+    txtL = 'LONG gates:\n'
+    for i = 0 to array.size(reasonsLong)-1
+        txtL += array.get(reasonsLong, i) + '\n'
+    txtS = 'SHORT gates:\n'
+    for i = 0 to array.size(reasonsShort)-1
+        txtS += array.get(reasonsShort, i) + '\n'
+    dbg := label.new(bar_index, high, txtL + '\n' + txtS, style=label.style_label_left, textcolor=color.white, color=color.new(color.black, 0), size=size.small)
