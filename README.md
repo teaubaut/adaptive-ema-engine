@@ -1,6 +1,6 @@
 # Adaptive EMA Strategy Pro
 
-> **A precision-engineered PineScript v5 strategy for TradingView**  
+> **A precision-engineered PineScript v6 strategy for TradingView**  
 > Combines multi-EMA channel logic, ATR-based stop management, and dynamic risk-adjusted leverage control — built for disciplined algorithmic execution in crypto, FX, and equities.
 
 ---
@@ -84,7 +84,7 @@ It’s designed to capture trending market phases while maintaining consistent r
 
 ## 🛠️ Requirements
 
-- **TradingView** (v5 compatible)
+- **TradingView** (v6 compatible)
 - **Broker / exchange simulator** for backtesting leverage
 - (Optional) Real-time data subscription for intraday use
 
