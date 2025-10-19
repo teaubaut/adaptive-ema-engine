@@ -1,0 +1,149 @@
+//@version=6
+indicator('Dual EMA High–Low Channels + 2 EMA Lines', overlay = true, max_labels_count=500)
+
+// ───── Groups ─────
+groupCh1 = "Channel 1"
+groupCh2 = "Channel 2"
+groupEMAs = "Extra EMA Lines"
+groupOpts = "Options"
+
+// ───── Channel 1 Inputs ─────
+showCh1        = input.bool(true, 'Show Channel 1', group=groupCh1)
+emaLength1     = input.int(9, 'EMA Length', minval = 1, group=groupCh1)
+emaHighColor1  = input.color(color.new(color.green, 0), 'High Color', group=groupCh1)
+emaLowColor1   = input.color(color.new(color.red,   0), 'Low Color',  group=groupCh1)
+fillColor1     = input.color(color.new(color.blue, 85), 'Fill Color', group=groupCh1)
+
+// ───── Channel 2 Inputs ─────
+showCh2        = input.bool(true, 'Show Channel 2', group=groupCh2)
+emaLength2     = input.int(20, 'EMA Length', minval = 1, group=groupCh2)
+emaHighColor2  = input.color(color.new(color.aqua,   0), 'High Color', group=groupCh2)
+emaLowColor2   = input.color(color.new(color.orange, 0), 'Low Color',  group=groupCh2)
+fillColor2     = input.color(color.new(color.purple, 85), 'Fill Color', group=groupCh2)
+
+// ───── Extra EMA Line Inputs ─────
+showLine1      = input.bool(true,  'Show EMA Line 1', group=groupEMAs)
+lineEmaLength1 = input.int(50,     'EMA Line 1 Length', minval = 1, group=groupEMAs)
+lineEmaColor1  = input.color(color.new(color.yellow, 0), 'EMA Line 1 Color', group=groupEMAs)
+
+showLine2      = input.bool(true,  'Show EMA Line 2', group=groupEMAs)
+lineEmaLength2 = input.int(200,    'EMA Line 2 Length', minval = 1, group=groupEMAs)
+lineEmaColor2  = input.color(color.new(color.white, 0), 'EMA Line 2 Color', group=groupEMAs)
+
+// ───── Options ─────
+colorBySlope   = input.bool(true,  'Color Channels by Slope', group=groupOpts)
+showCrossLbls  = input.bool(false, 'Show ▲/▼ Cross Labels', group=groupOpts)
+midWidth       = input.int(2,      'EMA Line Width', minval=1, maxval=5, group=groupOpts)
+
+// ───── Calculations ─────
+// Channels
+emaHigh1 = ta.ema(high, emaLength1)
+emaLow1  = ta.ema(low,  emaLength1)
+emaHigh2 = ta.ema(high, emaLength2)
+emaLow2  = ta.ema(low,  emaLength2)
+
+// Midlines (for slope coloring)
+mid1 = ta.ema(close, emaLength1)
+mid2 = ta.ema(close, emaLength2)
+
+slope1 = mid1 - mid1[1]
+slope2 = mid2 - mid2[1]
+up1    = slope1 >= 0
+up2    = slope2 >= 0
+
+// Colors (optionally switch by slope)
+hi1Col = colorBySlope ? (up1 ? emaHighColor1 : emaLowColor1) : emaHighColor1
+lo1Col = colorBySlope ? (up1 ? emaHighColor1 : emaLowColor1) : emaLowColor1
+hi2Col = colorBySlope ? (up2 ? emaHighColor2 : emaLowColor2) : emaHighColor2
+lo2Col = colorBySlope ? (up2 ? emaHighColor2 : emaLowColor2) : emaLowColor2
+
+// ───── Plot Channel 1 ─────
+plotHigh1 = plot(showCh1 ? emaHigh1 : na, title = 'Channel 1 EMA High', color = hi1Col, linewidth = 2)
+plotLow1  = plot(showCh1 ? emaLow1  : na, title = 'Channel 1 EMA Low',  color = lo1Col, linewidth = 2)
+fill(plotHigh1, plotLow1, color = showCh1 ? fillColor1 : na)
+
+// ───── Plot Channel 2 ─────
+plotHigh2 = plot(showCh2 ? emaHigh2 : na, title = 'Channel 2 EMA High', color = hi2Col, linewidth = 2)
+plotLow2  = plot(showCh2 ? emaLow2  : na, title = 'Channel 2 EMA Low',  color = lo2Col, linewidth = 2)
+fill(plotHigh2, plotLow2, color = showCh2 ? fillColor2 : na)
+
+// ───── Plot Extra EMA Lines ─────
+plot(showLine1 ? ta.ema(close, lineEmaLength1) : na, title = 'EMA Line 1', color = lineEmaColor1, linewidth = midWidth)
+plot(showLine2 ? ta.ema(close, lineEmaLength2) : na, title = 'EMA Line 2', color = lineEmaColor2, linewidth = midWidth)
+
+// ───── Signals ─────
+// Compute all crossovers globally first
+crossUpCh1_raw   = ta.crossover(close, emaHigh1)
+crossDownCh1_raw = ta.crossunder(close, emaLow1)
+crossUpCh2_raw   = ta.crossover(close, emaHigh2)
+crossDownCh2_raw = ta.crossunder(close, emaLow2)
+
+ema1 = ta.ema(close, lineEmaLength1)
+ema2 = ta.ema(close, lineEmaLength2)
+
+crossEma12Up_raw   = ta.crossover(ema1, ema2)
+crossEma12Down_raw = ta.crossunder(ema1, ema2)
+priceCrossEma1Up_raw   = ta.crossover(close, ema1)
+priceCrossEma1Down_raw = ta.crossunder(close, ema1)
+priceCrossEma2Up_raw   = ta.crossover(close, ema2)
+priceCrossEma2Down_raw = ta.crossunder(close, ema2)
+
+flipUp1_raw   = ta.crossover(slope1, 0)
+flipDown1_raw = ta.crossunder(slope1, 0)
+flipUp2_raw   = ta.crossover(slope2, 0)
+flipDown2_raw = ta.crossunder(slope2, 0)
+
+// Apply visibility conditions afterward
+crossUpCh1   = showCh1 and crossUpCh1_raw
+crossDownCh1 = showCh1 and crossDownCh1_raw
+crossUpCh2   = showCh2 and crossUpCh2_raw
+crossDownCh2 = showCh2 and crossDownCh2_raw
+
+crossEma12Up   = showLine1 and showLine2 and crossEma12Up_raw
+crossEma12Down = showLine1 and showLine2 and crossEma12Down_raw
+priceCrossEma1Up   = showLine1 and priceCrossEma1Up_raw
+priceCrossEma1Down = showLine1 and priceCrossEma1Down_raw
+priceCrossEma2Up   = showLine2 and priceCrossEma2Up_raw
+priceCrossEma2Down = showLine2 and priceCrossEma2Down_raw
+
+flipUp1   = flipUp1_raw
+flipDown1 = flipDown1_raw
+flipUp2   = flipUp2_raw
+flipDown2 = flipDown2_raw
+
+// ───── Labels (optional) ─────
+plotshape(showCrossLbls and crossUpCh1,   title="Ch1 Cross Up",   style=shape.triangleup,   location=location.belowbar, color=hi1Col, size=size.tiny, text="▲C1")
+plotshape(showCrossLbls and crossDownCh1, title="Ch1 Cross Down", style=shape.triangledown, location=location.abovebar, color=lo1Col, size=size.tiny, text="▼C1")
+plotshape(showCrossLbls and crossUpCh2,   title="Ch2 Cross Up",   style=shape.triangleup,   location=location.belowbar, color=hi2Col, size=size.tiny, text="▲C2")
+plotshape(showCrossLbls and crossDownCh2, title="Ch2 Cross Down", style=shape.triangledown, location=location.abovebar, color=lo2Col, size=size.tiny, text="▼C2")
+
+plotshape(showCrossLbls and crossEma12Up,   title="EMA1>EMA2",   style=shape.circle, location=location.belowbar, size=size.tiny, color=lineEmaColor1, text="E12↑")
+plotshape(showCrossLbls and crossEma12Down, title="EMA1<EMA2",   style=shape.circle, location=location.abovebar, size=size.tiny, color=lineEmaColor2, text="E12↓")
+
+// ───── Alerts ─────
+alertcondition(crossUpCh1,   "Price Crossed ABOVE Channel 1", "Close crossed above Channel 1 High.")
+alertcondition(crossDownCh1, "Price Crossed BELOW Channel 1", "Close crossed below Channel 1 Low.")
+alertcondition(crossUpCh2,   "Price Crossed ABOVE Channel 2", "Close crossed above Channel 2 High.")
+alertcondition(crossDownCh2, "Price Crossed BELOW Channel 2", "Close crossed below Channel 2 Low.")
+
+alertcondition(crossEma12Up,   "EMA1 crossed ABOVE EMA2", "EMA Line 1 crossed above EMA Line 2.")
+alertcondition(crossEma12Down, "EMA1 crossed BELOW EMA2", "EMA Line 1 crossed below EMA Line 2.")
+
+alertcondition(priceCrossEma1Up,   "Price crossed ABOVE EMA Line 1", "Close crossed above EMA Line 1.")
+alertcondition(priceCrossEma1Down, "Price crossed BELOW EMA Line 1", "Close crossed below EMA Line 1.")
+alertcondition(priceCrossEma2Up,   "Price crossed ABOVE EMA Line 2", "Close crossed above EMA Line 2.")
+alertcondition(priceCrossEma2Down, "Price crossed BELOW EMA Line 2", "Close crossed below EMA Line 2.")
+
+alertcondition(flipUp1,   "Channel 1 Slope Flip UP",   "Channel 1 midline slope turned UP.")
+alertcondition(flipDown1, "Channel 1 Slope Flip DOWN", "Channel 1 midline slope turned DOWN.")
+alertcondition(flipUp2,   "Channel 2 Slope Flip UP",   "Channel 2 midline slope turned UP.")
+alertcondition(flipDown2, "Channel 2 Slope Flip DOWN", "Channel 2 midline slope turned DOWN.")
+
+// ───── Status label (right edge) ─────
+var label status = na
+ch1State = up1 ? "UP" : "DOWN"
+ch2State = up2 ? "UP" : "DOWN"
+txt = str.format("Ch1 {0} | Ch2 {1}", ch1State, ch2State)
+if barstate.islast
+    label.delete(status)
+    status := label.new(bar_index, na, txt, style=label.style_label_right, textcolor=color.white, color=color.new(color.black, 35))
